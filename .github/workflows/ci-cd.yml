@@ -77,3 +77,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/eventflow-event-service:latest
             ${{ secrets.DOCKER_USERNAME }}/eventflow-event-service:${{ github.sha }}
+
+      - name: Trigger Render Deploy
+        if: github.ref == 'refs/heads/main'
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
