@@ -1,0 +1,27 @@
+# Pings the deployed service on Render so the instance stays warm (free tier sleep).
+# Set repository secret EVENT_SERVICE_RENDER_URL to your Render HTTPS URL, e.g.
+#   https://eventflow-event-service-xxxx.onrender.com
+# No trailing slash.
+
+name: Keep alive — event service
+
+on:
+  schedule:
+    - cron: "*/14 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /api/health
+        env:
+          BASE_URL: ${{ secrets.EVENT_SERVICE_RENDER_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "Set GitHub secret EVENT_SERVICE_RENDER_URL to your Render service URL (https://...onrender.com)"
+            exit 1
+          fi
+          curl -fsSL --max-time 30 "${BASE_URL}/api/health" | head -c 500
+          echo ""
+          echo "OK — event service responded"
