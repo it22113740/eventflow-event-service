@@ -1,6 +1,8 @@
 const axios = require("axios");
 const Event = require("../models/event.model");
 const logger = require("../config/logger");
+const { uploadEventImage } = require("../utils/uploadImage");
+const { isConfigured } = require("../config/cloudinary");
 
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || "http://notification-service:3004";
 
@@ -17,7 +19,31 @@ const parsePagination = (query) => {
   return { page, limit, skip };
 };
 
-// ─── controllers ────────────────────────────────────────────────────────────
+function parseTags(input) {
+  if (input == null || input === "") return [];
+  if (Array.isArray(input)) return input.map((t) => String(t).trim()).filter(Boolean).slice(0, 20);
+  return String(input)
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function parseHighlights(input) {
+  if (input == null || input === "") return [];
+  if (Array.isArray(input)) return input.map((t) => String(t).trim()).filter(Boolean).slice(0, 5);
+  return String(input)
+    .split(/\n|,/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+function numOrUndef(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 /**
  * POST /api/events
@@ -25,21 +51,48 @@ const parsePagination = (query) => {
  */
 const createEvent = async (req, res, next) => {
   try {
-    const { title, description, date, location, category, capacity } = req.body;
+    const body = req.body || {};
+    const capacity = Number(body.capacity ?? body.availableSeats);
+    const ticketPrice = numOrUndef(body.ticketPrice) ?? 0;
+    const tags = parseTags(body.tags);
+    const highlights = parseHighlights(body.highlights);
+    const venueType = ["indoor", "outdoor", "hybrid"].includes(body.venueType) ? body.venueType : "indoor";
+
+    let imageUrl = typeof body.imageUrl === "string" && body.imageUrl.trim() ? body.imageUrl.trim() : undefined;
+
+    if (req.file && req.file.buffer) {
+      if (!isConfigured()) {
+        return res.status(503).json({
+          success: false,
+          message: "Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
+        });
+      }
+      try {
+        imageUrl = await uploadEventImage(req.file.buffer, req.file.mimetype);
+      } catch (uploadErr) {
+        logger.error(`Cloudinary upload failed: ${uploadErr.message}`);
+        return res.status(502).json({ success: false, message: "Failed to upload image" });
+      }
+    }
 
     const event = await Event.create({
-      title,
-      description,
-      date,
-      location,
-      category,
+      title: body.title,
+      description: body.description || "",
+      date: body.date,
+      location: body.location,
+      category: body.category,
       capacity,
+      ticketPrice,
+      imageUrl,
+      tags,
+      highlights,
+      venueType,
+      cancellationPolicy: body.cancellationPolicy || "",
       createdBy: req.user._id || req.user.id || req.user.userId,
     });
 
     logger.info(`Event created: ${event._id} by user ${event.createdBy}`);
 
-    // Fire-and-forget broadcast to notification service
     axios
       .post(
         `${NOTIFICATION_SERVICE_URL}/api/notify/broadcast`,
@@ -52,9 +105,7 @@ const createEvent = async (req, res, next) => {
         },
         { timeout: 5000 }
       )
-      .catch((err) =>
-        logger.warn(`Failed to broadcast new event notification: ${err.message}`)
-      );
+      .catch((err) => logger.warn(`Failed to broadcast new event notification: ${err.message}`));
 
     return res.status(201).json({ success: true, data: event });
   } catch (err) {
@@ -72,6 +123,19 @@ const listEvents = async (req, res, next) => {
 
     const filter = {};
     if (req.query.category) filter.category = new RegExp(req.query.category, "i");
+    if (req.query.venueType && ["indoor", "outdoor", "hybrid"].includes(req.query.venueType)) {
+      filter.venueType = req.query.venueType;
+    }
+
+    const search = (req.query.search || req.query.q || "").trim();
+    if (search) {
+      filter.$or = [
+        { title: new RegExp(search, "i") },
+        { location: new RegExp(search, "i") },
+        { category: new RegExp(search, "i") },
+        { description: new RegExp(search, "i") },
+      ];
+    }
 
     const [events, total] = await Promise.all([
       Event.find(filter).sort({ date: 1 }).skip(skip).limit(limit).lean(),
@@ -121,7 +185,7 @@ const searchEvents = async (req, res, next) => {
       return res.json({ success: true, data: events, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
     } catch {
       const regex = new RegExp(q, "i");
-      filter = { $or: [{ title: regex }, { category: regex }] };
+      filter = { $or: [{ title: regex }, { category: regex }, { description: regex }, { location: regex }] };
       const [events, total] = await Promise.all([
         Event.find(filter).sort({ date: 1 }).skip(skip).limit(limit).lean(),
         Event.countDocuments(filter),
@@ -151,6 +215,21 @@ const getEvent = async (req, res, next) => {
   }
 };
 
+const UPDATE_FIELDS = [
+  "title",
+  "description",
+  "date",
+  "location",
+  "category",
+  "capacity",
+  "ticketPrice",
+  "imageUrl",
+  "tags",
+  "highlights",
+  "venueType",
+  "cancellationPolicy",
+];
+
 /**
  * PUT /api/events/:id
  * Update event. Admin only.
@@ -163,9 +242,28 @@ const updateEvent = async (req, res, next) => {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
-    const allowed = ["title", "description", "date", "location", "category", "capacity"];
-    allowed.forEach((field) => {
-      if (req.body[field] !== undefined) event[field] = req.body[field];
+    if (req.file && req.file.buffer) {
+      if (!isConfigured()) {
+        return res.status(503).json({
+          success: false,
+          message: "Image upload is not configured. Set CLOUDINARY_* environment variables.",
+        });
+      }
+      try {
+        event.imageUrl = await uploadEventImage(req.file.buffer, req.file.mimetype);
+      } catch (uploadErr) {
+        logger.error(`Cloudinary upload failed: ${uploadErr.message}`);
+        return res.status(502).json({ success: false, message: "Failed to upload image" });
+      }
+    }
+
+    const body = req.body || {};
+    if (body.tags !== undefined) event.tags = parseTags(body.tags);
+    if (body.highlights !== undefined) event.highlights = parseHighlights(body.highlights);
+
+    UPDATE_FIELDS.forEach((field) => {
+      if (field === "tags" || field === "highlights") return;
+      if (body[field] !== undefined) event[field] = body[field];
     });
 
     await event.save();

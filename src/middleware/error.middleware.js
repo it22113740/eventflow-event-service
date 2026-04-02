@@ -27,6 +27,11 @@ const errorHandler = (err, req, res, next) => {
     return res.status(400).json({ success: false, message: "Invalid ID format" });
   }
 
+  if (err.name === "MulterError") {
+    const message = err.code === "LIMIT_FILE_SIZE" ? "Image must be 5MB or smaller" : err.message;
+    return res.status(400).json({ success: false, message });
+  }
+
   const status = err.statusCode || err.status || 500;
   const message = status < 500 ? err.message : "Internal server error";
 
