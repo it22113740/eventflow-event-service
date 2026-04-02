@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  event-service:
+    build:
+      context: .
+      target: production
+    container_name: eventflow-event-service
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - MONGO_URI=mongodb://mongo:27017/eventflow-events
+      - USER_SERVICE_URL=http://user-service:5001
+      - SERVICE_NAME=eventflow-event-service
+      - LOG_LEVEL=info
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - eventflow-net
+
+  mongo:
+    image: mongo:7-jammy
+    container_name: eventflow-events-mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"   # exposed on a non-default host port to avoid conflicts
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eventflow-net
+
+volumes:
+  mongo-data:
+
+networks:
+  eventflow-net:
+    driver: bridge
+    name: eventflow-net
+    # If the user-service runs in the same compose project, switch to external: true
+    # and reference the shared network by name.
